@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "keychron-via-hue"
+version = "0.1.0"
+description = "CLI utility for managing RGB hue of QMK/VIA-compatible keyboards via qmk_hid"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+[project.scripts]
+keychron-via-hue = "keychron_via_hue.cli:main"
+
+[tool.setuptools]
+packages = ["keychron_via_hue"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+
+
+

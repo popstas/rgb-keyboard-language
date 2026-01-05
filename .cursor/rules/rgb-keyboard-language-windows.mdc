@@ -1,0 +1,135 @@
+---
+alwaysApply: true
+---
+# rgb-keyboard-language-windows - Implementation Notes
+
+## Критические решения и паттерны
+
+### Вызов внешних команд без окон терминала
+
+**Проблема:** При вызове `keychron-via-hue` или `qmk_hid` через subprocess на Windows открываются окна терминала.
+
+**Решение:**
+1. Для именованных цветов (green, red, blue, yellow, cyan, purple) вызывать `qmk_hid` напрямую:
+   ```python
+   cmd = ["qmk_hid", "via", "--rgb-color", color.lower().strip()]
+   ```
+2. Использовать флаг `CREATE_NO_WINDOW` для subprocess на Windows:
+   ```python
+   if sys.platform == "win32":
+       CREATE_NO_WINDOW = 0x08000000
+   result = subprocess.run(cmd, creationflags=CREATE_NO_WINDOW, ...)
+   ```
+
+**Почему:** 
+- Именованные цвета не требуют VID/PID и могут быть вызваны напрямую через `qmk_hid via --rgb-color`
+- Это быстрее и не требует промежуточного вызова `keychron-via-hue`
+- Для hex/hsv цветов все еще используется `keychron-via-hue` с VID/PID
+
+### Относительные импорты и прямой запуск
+
+**Проблема:** `ImportError: attempted relative import with no known parent package` при прямом запуске `main.py`.
+
+**Решение:** Поддержка обоих режимов запуска:
+```python
+if __name__ == "__main__" and __package__ is None:
+    # Прямой запуск - абсолютные импорты
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    from rgb_keyboard_language_windows.config import ...
+else:
+    # Запуск как модуль - относительные импорты
+    from .config import ...
+```
+
+### Архитектура определения раскладки
+
+**Решение:** Базовый класс `LayoutDetector` для абстракции:
+- `layout_base.py` - абстрактный класс с методом `get_current_layout() -> str | None`
+- `layout_win.py` - Windows реализация через Win32 API
+- Подготовка для будущей поддержки macOS
+
+**Windows API:**
+- `GetForegroundWindow()` -> `GetWindowThreadProcessId()` -> `GetKeyboardLayout()`
+- `LCIDToLocaleName()` для преобразования HKL в BCP-47
+- Fallback маппинг LCID -> lang code если API не работает
+
+### Thread-safe обновления tray иконки
+
+**Проблема:** Обновление tray иконки из watcher thread должно быть thread-safe.
+
+**Решение:**
+- Использовать `threading.Lock()` для защиты состояния
+- `pystray.Icon.update_menu()` для обновления меню
+- Обновление иконки через пересоздание с новым цветом (Pillow)
+
+### Обработка ошибок и backoff
+
+**Паттерн:** Экспоненциальный backoff при ошибках:
+```python
+delays = [1.0, 2.0, 5.0, 10.0]  # Максимум 10 секунд
+backoff_until = current_time + delays[min(consecutive_errors - 1, len(delays) - 1)]
+```
+
+**Важно:**
+- Не спамить командами при ошибках
+- Логировать все ошибки
+- Продолжать попытки с увеличивающейся задержкой
+
+### Rate limiting и дедупликация
+
+**Паттерн:** 
+- Проверка времени с последней отправки перед новой командой
+- Дедупликация: не отправлять, если цвет не изменился
+- Rate limit: минимальный интервал между командами (по умолчанию 200ms)
+
+### Конфигурация
+
+**Расположение:** `%APPDATA%/rgb-keyboard-language-windows/config.json`
+
+**Поведение:**
+- Автосоздание с дефолтами при первом запуске
+- Валидация значений при загрузке
+- Thread-safe обновление конфига в watcher
+
+### Tray иконка с цветом
+
+**Решение:** Генерация иконки на лету через Pillow:
+- Квадрат нужного цвета (16x16 или 32x32)
+- Бордер для лучшей видимости
+- Обновление при смене языка/цвета
+
+**Меню:**
+- Status (disabled) - текущая раскладка и цвет
+- Start/Stop - toggle enabled state
+- Colors -> Open config, Reload config
+- Quit
+
+### VS Code launch.json
+
+**Важно:** Указывать правильный Python из виртуального окружения:
+```json
+{
+    "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+    "cwd": "${workspaceFolder}/rgb-keyboard-language-windows"
+}
+```
+
+### PyInstaller сборка
+
+**Параметры:**
+- `--onefile` - один exe
+- `--windowed` или `--noconsole` - без консоли
+- `--hidden-import pystray._win32` - для pystray на Windows
+- `--collect-all pystray` и `--collect-all PIL` - для всех зависимостей
+
+## Известные ограничения
+
+1. macOS не реализован, только архитектура подготовлена
+2. Для hex/hsv цветов требуется `keychron-via-hue` и VID/PID
+3. Некоторые приложения могут иметь свою собственную раскладку (не определяется через Win32 API)
+
+## Тестирование
+
+- Unit-тесты для config и color matching логики
+- Интеграционное тестирование требует реальной клавиатуры
+- Логи в `%APPDATA%/rgb-keyboard-language-windows/app.log`

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rgb-keyboard-language-windows"
+version = "0.1.0"
+description = "Windows tray application that changes keyboard RGB color based on current keyboard layout"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "pywin32>=305",
+    "pystray>=0.19.4",
+    "Pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pyinstaller>=5.0.0",
+]
+
+[project.scripts]
+rgb-keyboard-language = "rgb_keyboard_language_windows.main:main"
+
+[tool.setuptools]
+packages = ["rgb_keyboard_language_windows"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
