@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import signal
 import sys
 import threading
 import time
@@ -26,6 +27,10 @@ else:
     from .tray import TrayIcon
 
 logger = logging.getLogger("rgb_keyboard_language")
+
+# Global flag for preventing multiple shutdown attempts
+_shutdown_initiated = False
+_shutdown_lock = threading.Lock()
 
 
 class KeyboardLayoutWatcher:
@@ -98,7 +103,7 @@ class KeyboardLayoutWatcher:
                 return
             self.running = False
         if self.thread:
-            self.thread.join(timeout=2.0)
+            self.thread.join(timeout=5.0)
         logger.info("Watcher thread stopped")
 
     def update_config(self, new_config: dict) -> None:
@@ -218,12 +223,42 @@ def main() -> None:
             config=config,
         )
 
+        # Shutdown function (idempotent)
+        def initiate_shutdown() -> None:
+            """Initiate graceful shutdown (idempotent)."""
+            global _shutdown_initiated
+            
+            with _shutdown_lock:
+                if _shutdown_initiated:
+                    logger.debug("Shutdown already initiated, ignoring")
+                    return
+                _shutdown_initiated = True
+            
+            def shutdown_thread():
+                try:
+                    logger.info("Starting graceful shutdown")
+                    watcher.stop()
+                    hue_sender.cleanup()
+                    time.sleep(0.1)  # Give time for cleanup to complete
+                    tray_icon.stop()
+                    logger.info("Shutdown completed")
+                    sys.exit(0)
+                except Exception as e:
+                    logger.error(f"Error during shutdown: {e}", exc_info=True)
+                    try:
+                        tray_icon.stop()
+                    except:
+                        pass
+                    sys.exit(1)
+            
+            thread = threading.Thread(target=shutdown_thread, daemon=False, name="ShutdownThread")
+            thread.start()
+
         # Tray icon callbacks (now that watcher exists)
         def on_quit() -> None:
-            logger.info("Quit requested")
-            watcher.stop()
-            tray_icon.stop()
-            sys.exit(0)
+            """Handle quit request - must be non-blocking."""
+            logger.info("Quit requested from tray menu")
+            initiate_shutdown()
 
         def on_reload_config() -> None:
             logger.info("Reloading configuration")
@@ -270,6 +305,43 @@ def main() -> None:
         tray_icon.on_reload_config = on_reload_config
         tray_icon.on_toggle_enabled = on_toggle_enabled
 
+        # Setup signal handlers for graceful shutdown
+        def setup_signal_handlers() -> None:
+            """Setup signal handlers for graceful shutdown."""
+            def signal_handler(signum, frame) -> None:
+                logger.info(f"Received signal {signum}, shutting down gracefully")
+                initiate_shutdown()
+
+            # Setup POSIX signal handlers
+            signal.signal(signal.SIGTERM, signal_handler)
+            signal.signal(signal.SIGINT, signal_handler)
+
+            # Windows-specific: handle CTRL_SHUTDOWN_EVENT
+            if sys.platform == "win32":
+                try:
+                    import win32api
+                    import win32con
+
+                    def windows_console_handler(ctrl_type: int) -> bool:
+                        """Handle Windows console control events."""
+                        if ctrl_type == win32con.CTRL_SHUTDOWN_EVENT:
+                            logger.info("Received CTRL_SHUTDOWN_EVENT")
+                            initiate_shutdown()
+                            return True  # Indicate we handled the event
+                        return False  # Let other handlers process other events
+
+                    win32api.SetConsoleCtrlHandler(windows_console_handler, True)
+                    logger.debug("Windows console control handler registered")
+                except ImportError:
+                    logger.warning("pywin32 not available, Windows shutdown handler not registered")
+            
+            # atexit fallback for cleanup
+            import atexit
+            atexit.register(initiate_shutdown)
+
+        # Setup signal handlers
+        setup_signal_handlers()
+
         # Start watcher
         watcher.start()
 
@@ -279,8 +351,13 @@ def main() -> None:
             tray_icon.run()
         except KeyboardInterrupt:
             logger.info("Interrupted by user")
+            initiate_shutdown()
         finally:
-            watcher.stop()
+            # If we reach here without shutdown initiated, it means normal exit
+            if not _shutdown_initiated:
+                logger.info("Normal exit, performing cleanup")
+                watcher.stop()
+                hue_sender.cleanup()
             logger.info("Application stopped")
 
     except Exception as e:

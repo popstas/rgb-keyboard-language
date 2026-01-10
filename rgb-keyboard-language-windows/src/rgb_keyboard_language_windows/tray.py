@@ -209,5 +209,16 @@ class TrayIcon:
     def stop(self) -> None:
         """Stop the tray icon."""
         if self.icon:
-            self.icon.stop()
+            try:
+                # Check if already stopped (if attribute exists)
+                if hasattr(self.icon, '_running') and not self.icon._running:
+                    logger.debug("Tray icon already stopped")
+                    return
+                self.icon.stop()
+                logger.debug("Tray icon stopped")
+            except Exception as e:
+                logger.error(f"Error stopping tray icon: {e}", exc_info=True)
+            finally:
+                # Clear reference even if stop() failed
+                self.icon = None
 

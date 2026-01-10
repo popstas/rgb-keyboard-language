@@ -1,9 +1,7 @@
 ---
 alwaysApply: true
 ---
-# rgb-keyboard-language-windows - Implementation Notes
-
-## Критические решения и паттерны
+# rgb-keyboard-language-windows - Implementation Notes## Критические решения и паттерны
 
 ### Вызов внешних команд без окон терминала
 
@@ -41,9 +39,7 @@ else:
     from .config import ...
 ```
 
-### Архитектура определения раскладки
-
-**Решение:** Базовый класс `LayoutDetector` для абстракции:
+### Архитектура определения раскладки**Решение:** Базовый класс `LayoutDetector` для абстракции:
 - `layout_base.py` - абстрактный класс с методом `get_current_layout() -> str | None`
 - `layout_win.py` - Windows реализация через Win32 API
 - Подготовка для будущей поддержки macOS
@@ -68,9 +64,7 @@ else:
 ```python
 delays = [1.0, 2.0, 5.0, 10.0]  # Максимум 10 секунд
 backoff_until = current_time + delays[min(consecutive_errors - 1, len(delays) - 1)]
-```
-
-**Важно:**
+```**Важно:**
 - Не спамить командами при ошибках
 - Логировать все ошибки
 - Продолжать попытки с увеличивающейся задержкой
