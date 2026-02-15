@@ -50,11 +50,18 @@ BI_RGB = 0
 CS_HREDRAW = 0x0002
 CS_VREDRAW = 0x0001
 
+# LRESULT is pointer-sized (64-bit on Win64)
+LRESULT = ctypes.c_longlong
+
 # DLL references
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 shell32 = ctypes.windll.shell32
 gdi32 = ctypes.windll.gdi32
+
+# Set DefWindowProcW signature for proper 64-bit parameter handling
+user32.DefWindowProcW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+user32.DefWindowProcW.restype = LRESULT
 
 # --- Menu item IDs ---
 IDM_STATUS = 1000
@@ -81,7 +88,7 @@ class WNDCLASSEXW(ctypes.Structure):
     _fields_ = [
         ("cbSize", wt.UINT),
         ("style", wt.UINT),
-        ("lpfnWndProc", ctypes.WINFUNCTYPE(ctypes.c_long, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)),
+        ("lpfnWndProc", ctypes.WINFUNCTYPE(LRESULT, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)),
         ("cbClsExtra", ctypes.c_int),
         ("cbWndExtra", ctypes.c_int),
         ("hInstance", wt.HINSTANCE),
@@ -386,7 +393,7 @@ class TrayIcon:
 
     def run(self) -> None:
         """Run the tray icon message loop (blocking)."""
-        WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+        WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
         self._wndproc = WNDPROC(self._wnd_proc)
 
         hinstance = kernel32.GetModuleHandleW(None)
