@@ -39,14 +39,6 @@ def main():
         "rgb-keyboard-language",
         "--add-data",
         f"{src_dir}{os.pathsep}src",  # Include source files
-        "--hidden-import",
-        "pystray._win32",
-        "--hidden-import",
-        "PIL._tkinter_finder",
-        "--collect-all",
-        "pystray",
-        "--collect-all",
-        "PIL",
         f"{src_dir}/rgb_keyboard_language_windows/main.py",
     ]
 

@@ -1,68 +1,221 @@
-"""System tray icon and menu using pystray."""
+"""System tray icon and menu using ctypes Windows API."""
 
+import ctypes
+import ctypes.wintypes as wt
 import logging
 import os
+import struct
 import subprocess
 import threading
 from pathlib import Path
 from typing import Callable, Optional
 
-import pystray
-from PIL import Image, ImageDraw
-
 from .config import get_config_path
 
 logger = logging.getLogger("rgb_keyboard_language")
 
+# --- Windows constants ---
+WM_DESTROY = 0x0002
+WM_CLOSE = 0x0010
+WM_COMMAND = 0x0111
+WM_USER = 0x0400
+WM_TRAYICON = WM_USER + 1
 
-def create_color_icon(color: str, size: int = 32) -> Image.Image:
-    """
-    Create a colored icon for the tray.
+NIM_ADD = 0x00000000
+NIM_MODIFY = 0x00000001
+NIM_DELETE = 0x00000002
+NIF_MESSAGE = 0x00000001
+NIF_ICON = 0x00000002
+NIF_TIP = 0x00000004
+NIF_INFO = 0x00000010
 
-    Args:
-        color: Color name (e.g., "green", "red") or hex code (e.g., "#00ff00")
-        size: Icon size in pixels (default: 32)
+MF_STRING = 0x0000
+MF_SEPARATOR = 0x0800
+MF_GRAYED = 0x0001
+MF_POPUP = 0x0010
 
-    Returns:
-        PIL Image object
-    """
-    # Color mapping
-    color_map = {
-        "green": (0, 255, 0),
-        "red": (255, 0, 0),
-        "blue": (0, 0, 255),
-        "yellow": (255, 255, 0),
-        "cyan": (0, 255, 255),
-        "purple": (128, 0, 128),
-    }
+WM_LBUTTONDBLCLK = 0x0203
+WM_RBUTTONUP = 0x0205
 
-    # Parse color
+TPM_LEFTALIGN = 0x0000
+TPM_RETURNCMD = 0x0100
+TPM_NONOTIFY = 0x0080
+
+IMAGE_ICON = 1
+LR_DEFAULTCOLOR = 0x0000
+
+DIB_RGB_COLORS = 0
+BI_RGB = 0
+
+CS_HREDRAW = 0x0002
+CS_VREDRAW = 0x0001
+
+# DLL references
+user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
+shell32 = ctypes.windll.shell32
+gdi32 = ctypes.windll.gdi32
+
+# --- Menu item IDs ---
+IDM_STATUS = 1000
+IDM_TOGGLE = 1001
+IDM_OPEN_CONFIG = 1002
+IDM_RELOAD_CONFIG = 1003
+IDM_QUIT = 1004
+
+
+# --- Structures ---
+class NOTIFYICONDATAW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wt.DWORD),
+        ("hWnd", wt.HWND),
+        ("uID", wt.UINT),
+        ("uFlags", wt.UINT),
+        ("uCallbackMessage", wt.UINT),
+        ("hIcon", wt.HICON),
+        ("szTip", wt.WCHAR * 128),
+    ]
+
+
+class WNDCLASSEXW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wt.UINT),
+        ("style", wt.UINT),
+        ("lpfnWndProc", ctypes.WINFUNCTYPE(ctypes.c_long, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)),
+        ("cbClsExtra", ctypes.c_int),
+        ("cbWndExtra", ctypes.c_int),
+        ("hInstance", wt.HINSTANCE),
+        ("hIcon", wt.HICON),
+        ("hCursor", wt.HANDLE),
+        ("hbrBackground", wt.HBRUSH),
+        ("lpszMenuName", wt.LPCWSTR),
+        ("lpszClassName", wt.LPCWSTR),
+        ("hIconSm", wt.HICON),
+    ]
+
+
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", wt.DWORD),
+        ("biWidth", wt.LONG),
+        ("biHeight", wt.LONG),
+        ("biPlanes", wt.WORD),
+        ("biBitCount", wt.WORD),
+        ("biCompression", wt.DWORD),
+        ("biSizeImage", wt.DWORD),
+        ("biXPelsPerMeter", wt.LONG),
+        ("biYPelsPerMeter", wt.LONG),
+        ("biClrUsed", wt.DWORD),
+        ("biClrImportant", wt.DWORD),
+    ]
+
+
+class BITMAPINFO(ctypes.Structure):
+    _fields_ = [
+        ("bmiHeader", BITMAPINFOHEADER),
+        ("bmiColors", wt.DWORD * 3),
+    ]
+
+
+class ICONINFO(ctypes.Structure):
+    _fields_ = [
+        ("fIcon", wt.BOOL),
+        ("xHotspot", wt.DWORD),
+        ("yHotspot", wt.DWORD),
+        ("hbmMask", wt.HBITMAP),
+        ("hbmColor", wt.HBITMAP),
+    ]
+
+
+# --- Color helpers ---
+COLOR_MAP = {
+    "green": (0, 255, 0),
+    "red": (255, 0, 0),
+    "blue": (0, 0, 255),
+    "yellow": (255, 255, 0),
+    "cyan": (0, 255, 255),
+    "purple": (128, 0, 128),
+    "gray": (128, 128, 128),
+}
+
+
+def _parse_color(color: str) -> tuple:
+    """Parse a color string to (r, g, b) tuple."""
     color_lower = color.lower().strip()
-    if color_lower in color_map:
-        rgb = color_map[color_lower]
-    elif color_lower.startswith("#"):
-        # Hex color
+    if color_lower in COLOR_MAP:
+        return COLOR_MAP[color_lower]
+    if color_lower.startswith("#"):
         hex_color = color_lower[1:]
         try:
-            rgb = tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
+            return tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
         except (ValueError, IndexError):
-            rgb = (128, 128, 128)  # Gray fallback
-    else:
-        rgb = (128, 128, 128)  # Gray fallback
+            pass
+    return (128, 128, 128)
 
-    # Create image
-    image = Image.new("RGB", (size, size), rgb)
-    draw = ImageDraw.Draw(image)
 
-    # Add a border for better visibility
-    border_color = tuple(max(0, c - 50) for c in rgb)
-    draw.rectangle([0, 0, size - 1, size - 1], outline=border_color, width=2)
+def _create_color_hicon(color: str, size: int = 32):
+    """Create an HICON with the given color (solid fill with darker border)."""
+    r, g, b = _parse_color(color)
+    br = max(0, r - 50)
+    bg = max(0, g - 50)
+    bb = max(0, b - 50)
 
-    return image
+    # Create DIB section for the color bitmap
+    bmi = BITMAPINFO()
+    bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+    bmi.bmiHeader.biWidth = size
+    bmi.bmiHeader.biHeight = -size  # Top-down
+    bmi.bmiHeader.biPlanes = 1
+    bmi.bmiHeader.biBitCount = 32
+    bmi.bmiHeader.biCompression = BI_RGB
+
+    hdc = user32.GetDC(0)
+    bits = ctypes.c_void_p()
+    hbm_color = gdi32.CreateDIBSection(
+        hdc, ctypes.byref(bmi), DIB_RGB_COLORS, ctypes.byref(bits), None, 0
+    )
+
+    if hbm_color and bits:
+        # Fill pixel data: BGRA format
+        pixel_data = (ctypes.c_uint8 * (size * size * 4)).from_address(bits.value)
+        for y in range(size):
+            for x in range(size):
+                offset = (y * size + x) * 4
+                # Border: 2px
+                if x < 2 or x >= size - 2 or y < 2 or y >= size - 2:
+                    pixel_data[offset] = bb      # B
+                    pixel_data[offset + 1] = bg  # G
+                    pixel_data[offset + 2] = br  # R
+                    pixel_data[offset + 3] = 255  # A
+                else:
+                    pixel_data[offset] = b        # B
+                    pixel_data[offset + 1] = g    # G
+                    pixel_data[offset + 2] = r    # R
+                    pixel_data[offset + 3] = 255  # A
+
+    # Create monochrome mask bitmap (all opaque)
+    hbm_mask = gdi32.CreateBitmap(size, size, 1, 1, None)
+
+    # Create icon
+    icon_info = ICONINFO()
+    icon_info.fIcon = True
+    icon_info.xHotspot = 0
+    icon_info.yHotspot = 0
+    icon_info.hbmMask = hbm_mask
+    icon_info.hbmColor = hbm_color
+
+    hicon = user32.CreateIconIndirect(ctypes.byref(icon_info))
+
+    # Cleanup bitmaps (icon keeps a copy)
+    gdi32.DeleteObject(hbm_color)
+    gdi32.DeleteObject(hbm_mask)
+    user32.ReleaseDC(0, hdc)
+
+    return hicon
 
 
 class TrayIcon:
-    """System tray icon with menu."""
+    """System tray icon with menu using ctypes Windows API."""
 
     def __init__(
         self,
@@ -70,87 +223,94 @@ class TrayIcon:
         on_reload_config: Callable[[], None],
         on_toggle_enabled: Callable[[], bool],
     ):
-        """
-        Initialize tray icon.
-
-        Args:
-            on_quit: Callback when Quit is selected
-            on_reload_config: Callback when Reload config is selected
-            on_toggle_enabled: Callback when Start/Stop is toggled, returns new enabled state
-        """
         self.on_quit = on_quit
         self.on_reload_config = on_reload_config
         self.on_toggle_enabled = on_toggle_enabled
 
-        self.icon: Optional[pystray.Icon] = None
         self.current_lang: Optional[str] = None
         self.current_color: Optional[str] = None
         self.enabled: bool = True
         self._lock = threading.Lock()
 
-        # Create initial icon (gray)
-        self._create_icon()
+        self._hwnd: Optional[int] = None
+        self._hicon: Optional[int] = None
+        self._nid: Optional[NOTIFYICONDATAW] = None
+        self._class_atom = None
+        self._wndproc = None  # prevent GC
 
-    def _create_icon(self) -> None:
-        """Create or recreate the tray icon."""
-        color = self.current_color or "gray"
-        icon_image = create_color_icon(color)
-        menu = self._create_menu()
+    def _build_menu(self):
+        """Build and return an HMENU for the popup context menu."""
+        hmenu = user32.CreatePopupMenu()
 
-        if self.icon:
-            self.icon.icon = icon_image
-            self.icon.menu = menu
-        else:
-            self.icon = pystray.Icon("RGB Keyboard Language", icon_image, menu=menu)
-
-    def _create_menu(self) -> pystray.Menu:
-        """Create context menu for tray icon."""
+        # Status line (grayed)
         status_text = "Status: Unknown"
         if self.current_lang:
             color_text = self.current_color or "unknown"
             status_text = f"Status: {self.current_lang} ({color_text})"
+        user32.AppendMenuW(hmenu, MF_STRING | MF_GRAYED, IDM_STATUS, status_text)
 
+        # Separator
+        user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
+
+        # Start/Stop
         enabled_text = "Stop" if self.enabled else "Start"
+        user32.AppendMenuW(hmenu, MF_STRING, IDM_TOGGLE, enabled_text)
 
-        return pystray.Menu(
-            pystray.MenuItem(status_text, lambda: None, enabled=False),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem(
-                enabled_text,
-                lambda: self._handle_toggle_enabled(),
-            ),
-            pystray.MenuItem(
-                "Colors",
-                pystray.Menu(
-                    pystray.MenuItem(
-                        "Open config",
-                        lambda: self._handle_open_config(),
-                    ),
-                    pystray.MenuItem(
-                        "Reload config",
-                        lambda: self._handle_reload_config(),
-                    ),
-                ),
-            ),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", lambda: self._handle_quit()),
-        )
+        # Colors submenu
+        hsubmenu = user32.CreatePopupMenu()
+        user32.AppendMenuW(hsubmenu, MF_STRING, IDM_OPEN_CONFIG, "Open config")
+        user32.AppendMenuW(hsubmenu, MF_STRING, IDM_RELOAD_CONFIG, "Reload config")
+        user32.AppendMenuW(hmenu, MF_STRING | MF_POPUP, hsubmenu, "Colors")
+
+        # Separator
+        user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
+
+        # Quit
+        user32.AppendMenuW(hmenu, MF_STRING, IDM_QUIT, "Quit")
+
+        return hmenu
+
+    def _wnd_proc(self, hwnd, msg, wparam, lparam):
+        """Window procedure for the hidden tray window."""
+        if msg == WM_TRAYICON:
+            if lparam == WM_RBUTTONUP:
+                # Show context menu
+                hmenu = self._build_menu()
+                pt = wt.POINT()
+                user32.GetCursorPos(ctypes.byref(pt))
+                user32.SetForegroundWindow(hwnd)
+                cmd = user32.TrackPopupMenu(
+                    hmenu,
+                    TPM_LEFTALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
+                    pt.x, pt.y, 0, hwnd, None,
+                )
+                user32.DestroyMenu(hmenu)
+                if cmd == IDM_TOGGLE:
+                    self._handle_toggle_enabled()
+                elif cmd == IDM_OPEN_CONFIG:
+                    self._handle_open_config()
+                elif cmd == IDM_RELOAD_CONFIG:
+                    self._handle_reload_config()
+                elif cmd == IDM_QUIT:
+                    self._handle_quit()
+                return 0
+        elif msg == WM_DESTROY:
+            self._remove_icon()
+            user32.PostQuitMessage(0)
+            return 0
+
+        return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
     def _handle_toggle_enabled(self) -> None:
-        """Handle Start/Stop toggle."""
         self.enabled = self.on_toggle_enabled()
-        self._update_menu()
 
     def _handle_reload_config(self) -> None:
-        """Handle Reload config."""
         self.on_reload_config()
-        self._update_menu()
 
     def _handle_open_config(self) -> None:
-        """Open config file in default editor."""
         config_path = get_config_path()
         try:
-            if os.name == "nt":  # Windows
+            if os.name == "nt":
                 os.startfile(str(config_path))
             else:
                 subprocess.run(["xdg-open", str(config_path)])
@@ -158,30 +318,60 @@ class TrayIcon:
             logger.error(f"Failed to open config file: {e}")
 
     def _handle_quit(self) -> None:
-        """Handle Quit menu item."""
         self.on_quit()
 
-    def _update_menu(self) -> None:
-        """Update menu items."""
-        if self.icon:
-            # Update menu by recreating it
-            menu = self._create_menu()
-            self.icon.menu = menu
-            # Force menu update
-            try:
-                self.icon.update_menu()
-            except AttributeError:
-                # update_menu might not be available in all pystray versions
-                pass
+    def _add_icon(self) -> None:
+        """Add the tray icon via Shell_NotifyIconW."""
+        color = self.current_color or "gray"
+        self._hicon = _create_color_hicon(color)
+
+        nid = NOTIFYICONDATAW()
+        nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+        nid.hWnd = self._hwnd
+        nid.uID = 1
+        nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP
+        nid.uCallbackMessage = WM_TRAYICON
+        nid.hIcon = self._hicon
+        nid.szTip = "RGB Keyboard Language"
+        self._nid = nid
+
+        shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
+
+    def _modify_icon(self, color: str) -> None:
+        """Update the tray icon color."""
+        if not self._nid or not self._hwnd:
+            return
+
+        old_icon = self._hicon
+        self._hicon = _create_color_hicon(color)
+        self._nid.hIcon = self._hicon
+        self._nid.uFlags = NIF_ICON | NIF_TIP
+
+        tip = "RGB Keyboard Language"
+        if self.current_lang:
+            color_text = self.current_color or "unknown"
+            tip = f"RGB: {self.current_lang} ({color_text})"
+        # Write tip (max 127 chars)
+        for i, ch in enumerate(tip[:127]):
+            self._nid.szTip[i] = ch
+        self._nid.szTip[min(len(tip), 127)] = '\0'
+
+        shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(self._nid))
+
+        if old_icon:
+            user32.DestroyIcon(old_icon)
+
+    def _remove_icon(self) -> None:
+        """Remove the tray icon."""
+        if self._nid:
+            shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(self._nid))
+            self._nid = None
+        if self._hicon:
+            user32.DestroyIcon(self._hicon)
+            self._hicon = None
 
     def update_status(self, lang: Optional[str], color: Optional[str]) -> None:
-        """
-        Update tray icon status (thread-safe).
-
-        Args:
-            lang: Current language code
-            color: Current color
-        """
+        """Update tray icon status (thread-safe)."""
         with self._lock:
             changed = False
             if lang != self.current_lang:
@@ -191,34 +381,57 @@ class TrayIcon:
                 self.current_color = color
                 changed = True
 
-            if changed:
-                self._create_icon()
-                if self.icon:
-                    # Update icon and menu
-                    try:
-                        self.icon.update_menu()
-                    except AttributeError:
-                        # update_menu might not be available in all pystray versions
-                        pass
+            if changed and self._hwnd and color:
+                self._modify_icon(color)
 
     def run(self) -> None:
-        """Run the tray icon (blocking)."""
-        if self.icon:
-            self.icon.run()
+        """Run the tray icon message loop (blocking)."""
+        WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+        self._wndproc = WNDPROC(self._wnd_proc)
+
+        hinstance = kernel32.GetModuleHandleW(None)
+        class_name = "RGBKeyboardLanguageTray"
+
+        wc = WNDCLASSEXW()
+        wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
+        wc.style = CS_HREDRAW | CS_VREDRAW
+        wc.lpfnWndProc = self._wndproc
+        wc.hInstance = hinstance
+        wc.lpszClassName = class_name
+
+        self._class_atom = user32.RegisterClassExW(ctypes.byref(wc))
+        if not self._class_atom:
+            logger.error("Failed to register window class")
+            return
+
+        self._hwnd = user32.CreateWindowExW(
+            0, class_name, "RGB Keyboard Language Tray",
+            0,  # WS_OVERLAPPED but invisible
+            0, 0, 0, 0,
+            0, 0, hinstance, None,
+        )
+        if not self._hwnd:
+            logger.error("Failed to create hidden window")
+            return
+
+        self._add_icon()
+        logger.info("Tray icon created")
+
+        # Message loop
+        msg = wt.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), 0, 0, 0) > 0:
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+
+        logger.info("Tray message loop ended")
 
     def stop(self) -> None:
-        """Stop the tray icon."""
-        if self.icon:
+        """Stop the tray icon by posting WM_CLOSE to the hidden window."""
+        if self._hwnd:
             try:
-                # Check if already stopped (if attribute exists)
-                if hasattr(self.icon, '_running') and not self.icon._running:
-                    logger.debug("Tray icon already stopped")
-                    return
-                self.icon.stop()
-                logger.debug("Tray icon stopped")
+                user32.PostMessageW(self._hwnd, WM_CLOSE, 0, 0)
+                logger.debug("Tray icon stop requested")
             except Exception as e:
                 logger.error(f"Error stopping tray icon: {e}", exc_info=True)
             finally:
-                # Clear reference even if stop() failed
-                self.icon = None
-
+                self._hwnd = None

@@ -319,21 +319,25 @@ def main() -> None:
             # Windows-specific: handle CTRL_SHUTDOWN_EVENT
             if sys.platform == "win32":
                 try:
-                    import win32api
-                    import win32con
+                    import ctypes
+
+                    CTRL_SHUTDOWN_EVENT = 6
+                    HandlerRoutine = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong)
 
                     def windows_console_handler(ctrl_type: int) -> bool:
                         """Handle Windows console control events."""
-                        if ctrl_type == win32con.CTRL_SHUTDOWN_EVENT:
+                        if ctrl_type == CTRL_SHUTDOWN_EVENT:
                             logger.info("Received CTRL_SHUTDOWN_EVENT")
                             initiate_shutdown()
                             return True  # Indicate we handled the event
                         return False  # Let other handlers process other events
 
-                    win32api.SetConsoleCtrlHandler(windows_console_handler, True)
+                    # Must keep reference to prevent garbage collection
+                    _handler = HandlerRoutine(windows_console_handler)
+                    ctypes.windll.kernel32.SetConsoleCtrlHandler(_handler, True)
                     logger.debug("Windows console control handler registered")
-                except ImportError:
-                    logger.warning("pywin32 not available, Windows shutdown handler not registered")
+                except Exception:
+                    logger.warning("Failed to register Windows shutdown handler")
             
             # atexit fallback for cleanup
             import atexit
