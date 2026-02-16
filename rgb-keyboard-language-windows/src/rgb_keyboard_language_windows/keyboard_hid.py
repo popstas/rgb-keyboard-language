@@ -101,17 +101,22 @@ def _rgb_to_hue(r: int, g: int, b: int) -> int:
 class KeyboardHID:
     """Persistent USB HID connection to QMK keyboard using VIA protocol."""
 
+    # Default RGB Matrix channel for VIA v3 protocol
+    DEFAULT_RGB_CHANNEL = 3
+
     def __init__(
         self,
         vid: int,
         pid: int,
         usage_page: int = 0xFF60,
         usage: int = 0x61,
+        rgb_channel: int = 3,
     ):
         self.vid = vid
         self.pid = pid
         self.usage_page = usage_page
         self.usage = usage
+        self.rgb_channel = rgb_channel
         self._device = None
 
     def connect(self) -> bool:
@@ -123,16 +128,18 @@ class KeyboardHID:
             return False
 
         try:
-            # Enumerate to find the correct interface (RAW HID)
-            devices = hid.enumerate(self.vid, self.pid)
+            # Enumerate by VID only — PID may differ between HID and qmk_hid
+            devices = hid.enumerate(self.vid, 0)
             target_path = None
 
             for dev_info in devices:
                 if (dev_info.get("usage_page") == self.usage_page
                         and dev_info.get("usage") == self.usage):
                     target_path = dev_info["path"]
+                    actual_pid = dev_info.get("product_id", 0)
                     logger.debug(
                         f"Found RAW HID interface: "
+                        f"VID=0x{self.vid:04X}, PID=0x{actual_pid:04X}, "
                         f"usage_page=0x{self.usage_page:04X}, "
                         f"usage=0x{self.usage:02X}"
                     )
@@ -141,12 +148,13 @@ class KeyboardHID:
             if target_path is None:
                 logger.warning(
                     f"No RAW HID interface found for "
-                    f"VID=0x{self.vid:04X} PID=0x{self.pid:04X} "
+                    f"VID=0x{self.vid:04X} "
                     f"(usage_page=0x{self.usage_page:04X}, usage=0x{self.usage:02X})"
                 )
                 return False
 
-            device = hid.Device(path=target_path)
+            device = hid.device()
+            device.open_path(target_path)
             self._device = device
             logger.info(
                 f"Connected to keyboard: "
@@ -173,14 +181,13 @@ class KeyboardHID:
         """Check if device is still connected."""
         return self._device is not None
 
-    def set_color(self, hue: int, saturation: int = 255, channel: int = 0) -> bool:
+    def set_color(self, hue: int, saturation: int = 255) -> bool:
         """
-        Send VIA set_color command.
+        Send VIA v3 set_color command.
 
         Args:
             hue: Hue value (0-255)
             saturation: Saturation value (0-255)
-            channel: RGB channel (0 for first RGB module)
 
         Returns:
             True on success, False on failure
@@ -188,10 +195,10 @@ class KeyboardHID:
         if self._device is None:
             return False
 
-        # Build 32-byte VIA report
+        # VIA v3: [cmd, channel, value_id, hue, saturation]
         report = bytearray(REPORT_SIZE)
         report[0] = VIA_SET_VALUE
-        report[1] = channel
+        report[1] = self.rgb_channel
         report[2] = VIA_RGB_COLOR
         report[3] = hue
         report[4] = saturation
@@ -205,7 +212,7 @@ class KeyboardHID:
             self._device = None  # Mark as disconnected
             return False
 
-    def get_color(self, channel: int = 0) -> Optional[tuple[int, int]]:
+    def get_color(self) -> Optional[tuple[int, int]]:
         """
         Read current (hue, saturation) from keyboard.
 
@@ -217,12 +224,12 @@ class KeyboardHID:
 
         report = bytearray(REPORT_SIZE)
         report[0] = VIA_GET_VALUE
-        report[1] = channel
+        report[1] = self.rgb_channel
         report[2] = VIA_RGB_COLOR
 
         try:
             self._device.write(bytes([0x00]) + bytes(report))
-            response = self._device.read(REPORT_SIZE, timeout=1000)
+            response = self._device.read(REPORT_SIZE, 1000)
             if response and len(response) >= 5:
                 return response[3], response[4]
             return None
@@ -231,14 +238,14 @@ class KeyboardHID:
             self._device = None
             return None
 
-    def save(self, channel: int = 0) -> bool:
+    def save(self) -> bool:
         """Save current settings to EEPROM."""
         if self._device is None:
             return False
 
         report = bytearray(REPORT_SIZE)
         report[0] = VIA_SAVE
-        report[1] = channel
+        report[1] = self.rgb_channel
         report[2] = VIA_RGB_COLOR
 
         try:

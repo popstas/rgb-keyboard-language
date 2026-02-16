@@ -364,10 +364,8 @@ class TrayIcon:
         if self.current_lang:
             color_text = self.current_color or "unknown"
             tip = f"RGB: {self.current_lang} ({color_text})"
-        # Write tip (max 127 chars)
-        for i, ch in enumerate(tip[:127]):
-            self._nid.szTip[i] = ch
-        self._nid.szTip[min(len(tip), 127)] = '\0'
+        # Update tooltip (max 127 chars, ctypes handles null-termination)
+        self._nid.szTip = tip[:127]
 
         shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(self._nid))
 
