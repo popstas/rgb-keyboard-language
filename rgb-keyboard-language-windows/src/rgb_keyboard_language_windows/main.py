@@ -195,13 +195,21 @@ def main() -> None:
         device = config.get("device", {})
         vid = device.get("vid", "0x3434")
         pid = device.get("pid", "0x0011")
+        usage_page_str = device.get("usage_page", "0xFF60")
+        usage_str = device.get("usage", "0x61")
         step = config.get("step", 8)
         delay_ms = config.get("delay_ms", 15)
         rate_limit_ms = config.get("rate_limit_ms", 50)
 
+        # Parse hex strings for usage_page/usage
+        usage_page = int(usage_page_str, 16) if isinstance(usage_page_str, str) else int(usage_page_str)
+        usage = int(usage_str, 16) if isinstance(usage_str, str) else int(usage_str)
+
         hue_sender = HueSender(
             vid=vid,
             pid=pid,
+            usage_page=usage_page,
+            usage=usage,
             step=step,
             delay_ms=delay_ms,
             rate_limit_ms=rate_limit_ms,

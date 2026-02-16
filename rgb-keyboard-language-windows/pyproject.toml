@@ -9,7 +9,7 @@ description = "Windows tray application that changes keyboard RGB color based on
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
-dependencies = []
+dependencies = ["hidapi>=0.14"]
 
 [project.optional-dependencies]
 dev = [

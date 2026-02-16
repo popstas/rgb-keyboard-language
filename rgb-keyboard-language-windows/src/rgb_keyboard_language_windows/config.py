@@ -10,6 +10,8 @@ DEFAULT_CONFIG = {
     "device": {
         "vid": "0x3434",
         "pid": "0x0011",
+        "usage_page": "0xFF60",
+        "usage": "0x61",
     },
     "step": 8,
     "delay_ms": 15,
@@ -120,6 +122,8 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             validated["device"] = {
                 "vid": str(device.get("vid", DEFAULT_CONFIG["device"]["vid"])),
                 "pid": str(device.get("pid", DEFAULT_CONFIG["device"]["pid"])),
+                "usage_page": str(device.get("usage_page", DEFAULT_CONFIG["device"]["usage_page"])),
+                "usage": str(device.get("usage", DEFAULT_CONFIG["device"]["usage"])),
             }
 
     # Validate numeric values

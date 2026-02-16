@@ -1,4 +1,4 @@
-"""Hue sender - calls keychron-via-hue CLI with rate limiting and deduplication."""
+"""Hue sender - sends color commands via direct USB HID (VIA protocol) or subprocess fallback."""
 
 import subprocess
 import time
@@ -19,26 +19,33 @@ else:
 
 class HueSender:
     """
-    Sends color commands to keyboard via keychron-via-hue CLI.
+    Sends color commands to keyboard.
+
+    Primary: Direct USB HID via VIA protocol (fast, ~10ms).
+    Fallback: subprocess calls to qmk_hid/keychron-via-hue (slow, ~500ms-2s).
 
     Features:
-    - Non-blocking async send via background thread
+    - Persistent HID connection with auto-reconnect
     - Rate limiting (skip-based, no blocking sleeps)
     - Deduplication (don't send if color hasn't changed)
     - Exponential backoff on errors (skip-based)
-    - Graceful shutdown of active subprocess
+    - Subprocess fallback if hidapi unavailable or HID connection fails
     """
 
     def __init__(
         self,
         vid: str,
         pid: str,
+        usage_page: int = 0xFF60,
+        usage: int = 0x61,
         step: int = 8,
         delay_ms: int = 15,
         rate_limit_ms: int = 50,
     ):
         self.vid = vid
         self.pid = pid
+        self.usage_page = usage_page
+        self.usage = usage
         self.step = step
         self.delay_ms = delay_ms
         self.rate_limit_ms = rate_limit_ms
@@ -49,14 +56,54 @@ class HueSender:
         self.consecutive_errors: int = 0
         self.backoff_until: float = 0.0
 
-        # Track active subprocess for graceful shutdown
+        # Direct HID connection
+        self._keyboard_hid = None
+        self._hid_available = True  # Will be set False if hidapi not installed
+        self._init_hid()
+
+        # Subprocess fallback state
         self.active_processes: List[subprocess.Popen] = []
         self._process_lock = threading.Lock()
-
-        # Background executor for non-blocking sends
-        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._executor: Optional[ThreadPoolExecutor] = None
         self._pending_color: Optional[str] = None
         self._send_lock = threading.Lock()
+
+    def _init_hid(self) -> None:
+        """Initialize direct HID connection."""
+        try:
+            from .keyboard_hid import KeyboardHID
+        except ImportError:
+            try:
+                from keyboard_hid import KeyboardHID
+            except ImportError:
+                logger.warning("keyboard_hid module not available")
+                self._hid_available = False
+                return
+
+        vid_int = self._parse_hex_id(self.vid)
+        pid_int = self._parse_hex_id(self.pid)
+
+        self._keyboard_hid = KeyboardHID(
+            vid=vid_int,
+            pid=pid_int,
+            usage_page=self.usage_page,
+            usage=self.usage,
+        )
+
+        if self._keyboard_hid.connect():
+            logger.info("Direct HID connection established")
+        else:
+            logger.warning("Direct HID connection failed, will use subprocess fallback")
+
+    def _parse_hex_id(self, value: str) -> int:
+        """Parse hex string like '0x3434' or '3434' to int."""
+        value = value.strip()
+        if value.startswith("0x") or value.startswith("0X"):
+            return int(value, 16)
+        try:
+            return int(value, 16)
+        except ValueError:
+            return int(value)
 
     def _normalize_hex_id(self, value: str) -> str:
         value = value.strip().lower()
@@ -70,6 +117,12 @@ class HueSender:
         delays = [1.0, 2.0, 5.0, 10.0]
         index = min(self.consecutive_errors - 1, len(delays) - 1)
         return delays[index]
+
+    def _ensure_executor(self) -> ThreadPoolExecutor:
+        """Lazily create executor only when subprocess fallback is needed."""
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=1)
+        return self._executor
 
     def cleanup(self, timeout: float = 2.0) -> None:
         """Gracefully terminate all active subprocesses."""
@@ -100,53 +153,100 @@ class HueSender:
                     pass
 
     def shutdown(self) -> None:
-        """Shut down the background executor and clean up processes."""
-        self._executor.shutdown(wait=False)
+        """Shut down HID connection, background executor, and clean up processes."""
+        if self._keyboard_hid is not None:
+            self._keyboard_hid.disconnect()
+        if self._executor is not None:
+            self._executor.shutdown(wait=False)
         self.cleanup()
 
     def send_color(self, color: str) -> bool:
         """
-        Send color to keyboard (non-blocking).
+        Send color to keyboard.
 
-        Submits the color change to a background thread. If a send is already
-        in progress, the new color is queued and will replace any pending send.
+        Uses direct HID if available (synchronous, fast).
+        Falls back to subprocess (async, slow).
 
         Returns:
-            True if the send was submitted or skipped (dedup), False if skipped
+            True if sent/submitted or skipped (dedup), False if skipped
             due to rate limit or backoff.
         """
-        # Deduplication: don't send if color hasn't changed
+        # Deduplication
         if color == self.last_color:
             logger.debug(f"Color unchanged ({color}), skipping send")
             return True
 
         current_time = time.time()
 
-        # Non-blocking rate limit: skip if too soon
-        time_since_last = (current_time - self.last_send_time) * 1000  # ms
+        # Non-blocking rate limit
+        time_since_last = (current_time - self.last_send_time) * 1000
         if time_since_last < self.rate_limit_ms:
-            logger.debug(f"Rate limit: {time_since_last:.0f}ms < {self.rate_limit_ms}ms, skipping (will retry next poll)")
+            logger.debug(f"Rate limit: {time_since_last:.0f}ms < {self.rate_limit_ms}ms, skipping")
             return False
 
-        # Non-blocking backoff: skip if still in backoff period
+        # Non-blocking backoff
         if current_time < self.backoff_until:
             remaining = self.backoff_until - current_time
             logger.debug(f"Backoff: {remaining:.1f}s remaining, skipping")
             return False
 
-        # Submit to background thread
+        # Try direct HID first
+        if self._hid_available and self._keyboard_hid is not None:
+            success = self._send_via_hid(color)
+            if success:
+                self.last_color = color
+                self.last_send_time = current_time
+                self.consecutive_errors = 0
+                self.backoff_until = 0.0
+                return True
+            else:
+                # HID failed, try reconnecting once
+                logger.debug("HID send failed, attempting reconnect")
+                if self._keyboard_hid.connect():
+                    success = self._send_via_hid(color)
+                    if success:
+                        self.last_color = color
+                        self.last_send_time = current_time
+                        self.consecutive_errors = 0
+                        self.backoff_until = 0.0
+                        return True
+                # Fall through to subprocess fallback
+                logger.warning("HID reconnect failed, falling back to subprocess")
+
+        # Subprocess fallback
+        return self._send_via_subprocess(color, current_time)
+
+    def _send_via_hid(self, color: str) -> bool:
+        """Send color via direct HID. Returns True on success."""
+        try:
+            from .keyboard_hid import color_to_hsv
+        except ImportError:
+            from keyboard_hid import color_to_hsv
+
+        try:
+            hue, saturation = color_to_hsv(color)
+        except ValueError as e:
+            logger.error(f"Invalid color '{color}': {e}")
+            return False
+
+        success = self._keyboard_hid.set_color(hue, saturation)
+        if success:
+            logger.info(f"Color sent via HID: {color} (hue={hue}, sat={saturation})")
+        return success
+
+    def _send_via_subprocess(self, color: str, current_time: float) -> bool:
+        """Send color via subprocess (fallback). Non-blocking."""
         with self._send_lock:
             self._pending_color = color
 
-        self._executor.submit(self._do_send, color)
-        # Update last_color immediately so the watch loop doesn't re-trigger
+        self._ensure_executor().submit(self._do_send_subprocess, color)
         self.last_color = color
         self.last_send_time = current_time
         return True
 
-    def _do_send(self, color: str) -> None:
-        """Actually send the color command (runs in background thread)."""
-        # Check if a newer color was requested while we were queued
+    def _do_send_subprocess(self, color: str) -> None:
+        """Actually send the color command via subprocess (runs in background thread)."""
+        # Check if a newer color was requested
         with self._send_lock:
             latest = self._pending_color
         if latest != color:
@@ -172,7 +272,7 @@ class HueSender:
         process: Optional[subprocess.Popen] = None
 
         try:
-            logger.info(f"Sending color: {color} (VID: {self.vid}, PID: {self.pid})")
+            logger.info(f"Sending color via subprocess: {color}")
 
             process = subprocess.Popen(
                 cmd,
@@ -212,10 +312,9 @@ class HueSender:
                     logger.info(f"Color sent successfully: {color}")
             else:
                 error_msg = stderr.strip() if stderr else stdout.strip() or "Unknown error"
-                logger.error(f"keychron-via-hue failed: {error_msg}")
+                logger.error(f"Subprocess failed: {error_msg}")
                 self.consecutive_errors += 1
                 self.backoff_until = time.time() + self._get_backoff_delay()
-                # Reset last_color so next poll retries
                 self.last_color = None
 
         except FileNotFoundError:
