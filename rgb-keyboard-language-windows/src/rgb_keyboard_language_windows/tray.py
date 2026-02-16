@@ -244,6 +244,7 @@ class TrayIcon:
         self._nid: Optional[NOTIFYICONDATAW] = None
         self._class_atom = None
         self._wndproc = None  # prevent GC
+        self._icon_cache: dict[str, int] = {}  # color -> HICON handle
 
     def _build_menu(self):
         """Build and return an HMENU for the popup context menu."""
@@ -330,7 +331,7 @@ class TrayIcon:
     def _add_icon(self) -> None:
         """Add the tray icon via Shell_NotifyIconW."""
         color = self.current_color or "gray"
-        self._hicon = _create_color_hicon(color)
+        self._hicon = self._get_cached_hicon(color)
 
         nid = NOTIFYICONDATAW()
         nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
@@ -344,13 +345,18 @@ class TrayIcon:
 
         shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
 
+    def _get_cached_hicon(self, color: str) -> int:
+        """Get or create a cached HICON for the given color."""
+        if color not in self._icon_cache:
+            self._icon_cache[color] = _create_color_hicon(color)
+        return self._icon_cache[color]
+
     def _modify_icon(self, color: str) -> None:
         """Update the tray icon color."""
         if not self._nid or not self._hwnd:
             return
 
-        old_icon = self._hicon
-        self._hicon = _create_color_hicon(color)
+        self._hicon = self._get_cached_hicon(color)
         self._nid.hIcon = self._hicon
         self._nid.uFlags = NIF_ICON | NIF_TIP
 
@@ -365,17 +371,16 @@ class TrayIcon:
 
         shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(self._nid))
 
-        if old_icon:
-            user32.DestroyIcon(old_icon)
-
     def _remove_icon(self) -> None:
-        """Remove the tray icon."""
+        """Remove the tray icon and destroy all cached icons."""
         if self._nid:
             shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(self._nid))
             self._nid = None
-        if self._hicon:
-            user32.DestroyIcon(self._hicon)
-            self._hicon = None
+        # Destroy all cached icons
+        for cached_hicon in self._icon_cache.values():
+            user32.DestroyIcon(cached_hicon)
+        self._icon_cache.clear()
+        self._hicon = None
 
     def update_status(self, lang: Optional[str], color: Optional[str]) -> None:
         """Update tray icon status (thread-safe)."""

@@ -147,12 +147,12 @@ class KeyboardLayoutWatcher:
                             f"Layout changed: {last_lang} -> {lang}, "
                             f"color: {last_color} -> {target_color}"
                         )
-                        success = self.hue_sender.send_color(target_color)
-                        if success:
+                        # send_color is non-blocking: returns True if submitted/deduped,
+                        # False if skipped (rate limit/backoff) - will retry next poll
+                        submitted = self.hue_sender.send_color(target_color)
+                        if submitted:
                             last_color = target_color
                             initial_sent = True
-                        else:
-                            logger.warning("Failed to send color, will retry")
                     else:
                         logger.debug(f"Layout unchanged: {lang}, color: {target_color}")
 
@@ -197,7 +197,7 @@ def main() -> None:
         pid = device.get("pid", "0x0011")
         step = config.get("step", 8)
         delay_ms = config.get("delay_ms", 15)
-        rate_limit_ms = config.get("rate_limit_ms", 200)
+        rate_limit_ms = config.get("rate_limit_ms", 50)
 
         hue_sender = HueSender(
             vid=vid,
@@ -238,7 +238,7 @@ def main() -> None:
                 try:
                     logger.info("Starting graceful shutdown")
                     watcher.stop()
-                    hue_sender.cleanup()
+                    hue_sender.shutdown()
                     time.sleep(0.1)  # Give time for cleanup to complete
                     tray_icon.stop()
                     logger.info("Shutdown completed")
@@ -361,7 +361,7 @@ def main() -> None:
             if not _shutdown_initiated:
                 logger.info("Normal exit, performing cleanup")
                 watcher.stop()
-                hue_sender.cleanup()
+                hue_sender.shutdown()
             logger.info("Application stopped")
 
     except Exception as e:

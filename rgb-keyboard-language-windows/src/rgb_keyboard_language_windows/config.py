@@ -17,8 +17,8 @@ DEFAULT_CONFIG = {
         "en": "green",
     },
     "default_color": "red",
-    "poll_interval_ms": 150,
-    "rate_limit_ms": 200,
+    "poll_interval_ms": 100,
+    "rate_limit_ms": 50,
     "enabled": True,
 }
 

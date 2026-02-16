@@ -8,9 +8,13 @@
 
 ## Ключевые паттерны кода
 
-### 1. Вызов внешних команд без окон
+### 1. Вызов внешних команд без окон (non-blocking)
 
 ```python
+# HueSender использует ThreadPoolExecutor для неблокирующей отправки:
+# send_color() -> немедленный return, subprocess запускается в фоновом потоке
+# Rate limit и backoff - skip-based (return False), без time.sleep()
+
 # Для именованных цветов - прямой вызов qmk_hid
 if is_named_color:
     cmd = ["qmk_hid", "via", "--rgb-color", color.lower().strip()]
@@ -21,7 +25,7 @@ else:
 # Скрытие окна терминала на Windows
 if sys.platform == "win32":
     CREATE_NO_WINDOW = 0x08000000
-    result = subprocess.run(cmd, creationflags=CREATE_NO_WINDOW, ...)
+    process = subprocess.Popen(cmd, creationflags=CREATE_NO_WINDOW, ...)
 ```
 
 ### 2. Поддержка прямого запуска и модуля
@@ -43,14 +47,14 @@ class KeyboardLayoutWatcher:
     def __init__(self, ...):
         self._lock = threading.Lock()
         self.config = config
-    
+
     def update_config(self, new_config: dict):
         with self._lock:
             self.config = new_config
-    
+
     def _watch_loop(self):
         with self._lock:
-            poll_interval = self.config.get("poll_interval_ms", 150) / 1000.0
+            poll_interval = self.config.get("poll_interval_ms", 100) / 1000.0
             enabled = self.config.get("enabled", True)
 ```
 
@@ -91,9 +95,20 @@ src/rgb_keyboard_language_windows/
 ├── layout_base.py   # Абстрактный класс (подготовка под macOS)
 ├── layout_win.py    # Windows API реализация
 ├── hue_sender.py    # Отправка цвета (qmk_hid/keychron-via-hue)
-├── tray.py          # pystray иконка, меню, цветная иконка
+├── tray.py          # Tray иконка (ctypes Windows API), меню, кэш HICON
 └── logging_.py      # Файловое + консоль логирование
 ```
+
+## Архитектура: неблокирующий цикл
+
+Главный принцип: **watch loop никогда не блокируется** на отправке цвета.
+
+- `_watch_loop()` опрашивает раскладку каждые 100ms, вызывает `send_color()` — возвращается мгновенно
+- `HueSender.send_color()` — ставит задачу в `ThreadPoolExecutor(max_workers=1)`, возвращает True/False
+- Rate limit / backoff — не sleep, а skip (return False, retry на следующем poll)
+- При ошибке subprocess — `last_color = None` для повторной попытки
+- Stale send detection: если пришёл новый цвет пока старый в очереди — старый пропускается
+- `shutdown()` останавливает executor + cleanup процессов
 
 ## Важные детали реализации
 
@@ -126,15 +141,12 @@ def get_color_for_layout(lang_code: str | None, config: dict) -> str:
     return default_color
 ```
 
-### Tray иконка
+### Tray иконка (pure ctypes, без Pillow)
 
 ```python
-def create_color_icon(color: str, size: int = 32) -> Image.Image:
-    # Генерация цветного квадрата через Pillow
-    image = Image.new("RGB", (size, size), rgb)
-    draw = ImageDraw.Draw(image)
-    draw.rectangle([0, 0, size - 1, size - 1], outline=border_color, width=2)
-    return image
+# Иконки создаются через CreateDIBSection + CreateIconIndirect (ctypes)
+# Кэшируются в _icon_cache: dict[str, HICON] — не пересоздаются при каждом обновлении
+# При удалении иконки — все кэшированные HICON уничтожаются через DestroyIcon
 ```
 
 ## VS Code настройки
@@ -157,15 +169,12 @@ def create_color_icon(color: str, size: int = 32) -> Image.Image:
 ## Сборка exe
 
 ```python
-# build.py
+# build.py — pure ctypes, без внешних зависимостей (pystray/PIL удалены)
 cmd = [
     "pyinstaller",
     "--onefile",
     "--windowed",  # Без консоли
     "--name", "rgb-keyboard-language",
-    "--hidden-import", "pystray._win32",
-    "--collect-all", "pystray",
-    "--collect-all", "PIL",
     "src/rgb_keyboard_language_windows/main.py"
 ]
 ```
@@ -183,7 +192,7 @@ cmd = [
    - Решение: Для именованных цветов не передавать, использовать прямой вызов
 
 4. **Tray иконка не обновляется**
-   - Решение: Использовать `icon.update_menu()` и thread-safe обновления
+   - Решение: Thread-safe обновления через `_lock`, кэш HICON в `_icon_cache`
 
 ## Тестирование
 
