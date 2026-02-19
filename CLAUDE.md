@@ -33,7 +33,7 @@ if sys.platform == "win32":
 ```python
 if __name__ == "__main__" and __package__ is None:
     # Прямой запуск - абсолютные импорты
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    sys.path.insert(0, str(Path(__file__).parent.parent))
     from rgb_keyboard_language_windows.config import ...
 else:
     # Запуск как модуль - относительные импорты
@@ -86,7 +86,7 @@ locale_name = buffer.value  # "en-US", "ru-RU", etc.
 
 ## Структура файлов
 
-### rgb-keyboard-language-windows/
+### Корень проекта (rgb-keyboard-language-windows package)
 
 ```
 src/rgb_keyboard_language_windows/
@@ -160,7 +160,7 @@ def get_color_for_layout(lang_code: str | None, config: dict) -> str:
     "request": "launch",
     "module": "rgb_keyboard_language_windows.main",
     "python": "${workspaceFolder}/.venv/Scripts/python.exe",
-    "cwd": "${workspaceFolder}/rgb-keyboard-language-windows"
+    "cwd": "${workspaceFolder}"
 }
 ```
 
@@ -198,10 +198,9 @@ cmd = [
 
 ```bash
 # Установка в editable mode
-pip install -e ./rgb-keyboard-language-windows
+pip install -e .
 
 # Запуск тестов
-cd rgb-keyboard-language-windows
 pytest tests/ -v
 ```
 

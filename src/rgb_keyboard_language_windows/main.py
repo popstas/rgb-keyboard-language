@@ -12,7 +12,7 @@ from typing import Optional
 # Support both direct execution and module import
 if __name__ == "__main__" and __package__ is None:
     # Add parent directory to path for direct execution
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    sys.path.insert(0, str(Path(__file__).parent.parent))
     from rgb_keyboard_language_windows.config import load_config, get_color_for_layout, save_config
     from rgb_keyboard_language_windows.hue_sender import HueSender
     from rgb_keyboard_language_windows.layout_win import WindowsLayoutDetector
