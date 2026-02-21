@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rgb-keyboard-language-windows"
-version = "0.1.0"
+version = "0.1.1"
 description = "Windows tray application that changes keyboard RGB color based on current keyboard layout"
 readme = "README.md"
 requires-python = ">=3.10"
