@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "keychron-via-hue"
-version = "0.1.1"
+version = "0.1.2"
 description = "CLI utility for managing RGB hue of QMK/VIA-compatible keyboards via qmk_hid"
 readme = "README.md"
 requires-python = ">=3.10"
