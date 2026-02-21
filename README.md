@@ -44,6 +44,15 @@ python build.py
 
 Executable will be in `rgb-keyboard-language-windows/dist/rgb-keyboard-language.exe`
 
+### Releasing
+
+1. Update version in `pyproject.toml`
+2. Commit: `git commit -am "release: v0.x.x"`
+3. Tag: `git tag v0.x.x`
+4. Push: `git push && git push --tags`
+
+GitHub Actions will automatically build the Windows exe and create a release with it attached.
+
 ## Project Structure
 
 ```
