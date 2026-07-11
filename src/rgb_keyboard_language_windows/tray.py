@@ -21,6 +21,15 @@ WM_COMMAND = 0x0111
 WM_USER = 0x0400
 WM_TRAYICON = WM_USER + 1
 
+# Power management (display on/off detection)
+WM_POWERBROADCAST = 0x0218
+PBT_POWERSETTINGCHANGE = 0x8013
+DEVICE_NOTIFY_WINDOW_HANDLE = 0x00000000
+# GUID_CONSOLE_DISPLAY_STATE: Data byte 0=off, 1=on, 2=dimmed (Windows 8+)
+DISPLAY_STATE_OFF = 0x0
+DISPLAY_STATE_ON = 0x1
+DISPLAY_STATE_DIMMED = 0x2
+
 NIM_ADD = 0x00000000
 NIM_MODIFY = 0x00000001
 NIM_DELETE = 0x00000002
@@ -99,6 +108,35 @@ class WNDCLASSEXW(ctypes.Structure):
         ("lpszClassName", wt.LPCWSTR),
         ("hIconSm", wt.HICON),
     ]
+
+
+class GUID(ctypes.Structure):
+    _fields_ = [
+        ("Data1", wt.DWORD),
+        ("Data2", wt.WORD),
+        ("Data3", wt.WORD),
+        ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+    def __eq__(self, other):
+        if not isinstance(other, GUID):
+            return NotImplemented
+        return bytes(self) == bytes(other)
+
+
+class POWERBROADCAST_SETTING(ctypes.Structure):
+    _fields_ = [
+        ("PowerSetting", GUID),
+        ("DataLength", wt.DWORD),
+        ("Data", ctypes.c_ubyte * 4),
+    ]
+
+
+# GUID_CONSOLE_DISPLAY_STATE = {6fe69556-704a-47a0-8f24-c28d936fda47}
+GUID_CONSOLE_DISPLAY_STATE = GUID(
+    0x6FE69556, 0x704A, 0x47A0,
+    (ctypes.c_ubyte * 8)(0x8F, 0x24, 0xC2, 0x8D, 0x93, 0x6F, 0xDA, 0x47),
+)
 
 
 class BITMAPINFOHEADER(ctypes.Structure):
@@ -229,10 +267,14 @@ class TrayIcon:
         on_quit: Callable[[], None],
         on_reload_config: Callable[[], None],
         on_toggle_enabled: Callable[[], bool],
+        on_display_off: Optional[Callable[[], None]] = None,
+        on_display_on: Optional[Callable[[], None]] = None,
     ):
         self.on_quit = on_quit
         self.on_reload_config = on_reload_config
         self.on_toggle_enabled = on_toggle_enabled
+        self.on_display_off = on_display_off
+        self.on_display_on = on_display_on
 
         self.current_lang: Optional[str] = None
         self.current_color: Optional[str] = None
@@ -245,6 +287,8 @@ class TrayIcon:
         self._class_atom = None
         self._wndproc = None  # prevent GC
         self._icon_cache: dict[str, int] = {}  # color -> HICON handle
+        self._power_notify = None  # RegisterPowerSettingNotification handle
+        self._last_display_state: Optional[int] = None
 
     def _build_menu(self):
         """Build and return an HMENU for the popup context menu."""
@@ -302,12 +346,37 @@ class TrayIcon:
                 elif cmd == IDM_QUIT:
                     self._handle_quit()
                 return 0
+        elif msg == WM_POWERBROADCAST:
+            if wparam == PBT_POWERSETTINGCHANGE and lparam:
+                try:
+                    setting = ctypes.cast(
+                        lparam, ctypes.POINTER(POWERBROADCAST_SETTING)
+                    ).contents
+                    if setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE:
+                        self._handle_display_state(setting.Data[0])
+                except Exception as e:
+                    logger.error(f"Error handling power broadcast: {e}", exc_info=True)
+            return 1  # TRUE
         elif msg == WM_DESTROY:
             self._remove_icon()
             user32.PostQuitMessage(0)
             return 0
 
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    def _handle_display_state(self, state: int) -> None:
+        """Dispatch display on/off callbacks (ignoring the dimmed state)."""
+        if state == DISPLAY_STATE_DIMMED or state == self._last_display_state:
+            return
+        self._last_display_state = state
+        if state == DISPLAY_STATE_OFF:
+            logger.info("Display turned off")
+            if self.on_display_off:
+                self.on_display_off()
+        elif state == DISPLAY_STATE_ON:
+            logger.info("Display turned on")
+            if self.on_display_on:
+                self.on_display_on()
 
     def _handle_toggle_enabled(self) -> None:
         self.enabled = self.on_toggle_enabled()
@@ -369,8 +438,39 @@ class TrayIcon:
 
         shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(self._nid))
 
+    def _register_power_notification(self) -> None:
+        """Register for display on/off notifications (Windows 8+)."""
+        if self.on_display_off is None and self.on_display_on is None:
+            return
+        try:
+            user32.RegisterPowerSettingNotification.restype = wt.HANDLE
+            user32.RegisterPowerSettingNotification.argtypes = [
+                wt.HANDLE, ctypes.POINTER(GUID), wt.DWORD,
+            ]
+            self._power_notify = user32.RegisterPowerSettingNotification(
+                self._hwnd,
+                ctypes.byref(GUID_CONSOLE_DISPLAY_STATE),
+                DEVICE_NOTIFY_WINDOW_HANDLE,
+            )
+            if self._power_notify:
+                logger.info("Registered for display power notifications")
+            else:
+                logger.warning("RegisterPowerSettingNotification returned NULL")
+        except Exception as e:
+            logger.error(f"Failed to register power notification: {e}", exc_info=True)
+
+    def _unregister_power_notification(self) -> None:
+        """Unregister display power notifications."""
+        if self._power_notify:
+            try:
+                user32.UnregisterPowerSettingNotification(self._power_notify)
+            except Exception as e:
+                logger.error(f"Failed to unregister power notification: {e}")
+            self._power_notify = None
+
     def _remove_icon(self) -> None:
         """Remove the tray icon and destroy all cached icons."""
+        self._unregister_power_notification()
         if self._nid:
             shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(self._nid))
             self._nid = None
@@ -425,6 +525,7 @@ class TrayIcon:
             return
 
         self._add_icon()
+        self._register_power_notification()
         logger.info("Tray icon created")
 
         # Message loop

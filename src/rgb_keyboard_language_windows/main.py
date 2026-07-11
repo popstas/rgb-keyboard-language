@@ -200,6 +200,7 @@ def main() -> None:
         step = config.get("step", 8)
         delay_ms = config.get("delay_ms", 15)
         rate_limit_ms = config.get("rate_limit_ms", 50)
+        restore_brightness = config.get("restore_brightness", 255)
 
         # Parse hex strings for usage_page/usage
         usage_page = int(usage_page_str, 16) if isinstance(usage_page_str, str) else int(usage_page_str)
@@ -213,6 +214,7 @@ def main() -> None:
             step=step,
             delay_ms=delay_ms,
             rate_limit_ms=rate_limit_ms,
+            restore_brightness=restore_brightness,
         )
 
         layout_detector = WindowsLayoutDetector()
@@ -268,6 +270,20 @@ def main() -> None:
             logger.info("Quit requested from tray menu")
             initiate_shutdown()
 
+        def on_display_off() -> None:
+            """Turn keyboard lights off when the display turns off."""
+            if not watcher.config.get("lights_off_on_display_off", True):
+                return
+            logger.info("Display off -> turning lights off")
+            hue_sender.lights_off()
+
+        def on_display_on() -> None:
+            """Restore keyboard lights (language color) when the display turns on."""
+            if not watcher.config.get("lights_off_on_display_off", True):
+                return
+            logger.info("Display on -> restoring language light")
+            hue_sender.lights_on()
+
         def on_reload_config() -> None:
             logger.info("Reloading configuration")
             try:
@@ -290,6 +306,7 @@ def main() -> None:
                     delay_ms=new_delay_ms,
                     rate_limit_ms=new_rate_limit_ms,
                 )
+                hue_sender.restore_brightness = new_config.get("restore_brightness", 255)
                 logger.info("HueSender parameters updated")
 
                 logger.info("Configuration reloaded successfully")
@@ -312,6 +329,8 @@ def main() -> None:
         tray_icon.on_quit = on_quit
         tray_icon.on_reload_config = on_reload_config
         tray_icon.on_toggle_enabled = on_toggle_enabled
+        tray_icon.on_display_off = on_display_off
+        tray_icon.on_display_on = on_display_on
 
         # Setup signal handlers for graceful shutdown
         def setup_signal_handlers() -> None:

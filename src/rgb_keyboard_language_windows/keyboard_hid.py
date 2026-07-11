@@ -212,6 +212,33 @@ class KeyboardHID:
             self._device = None  # Mark as disconnected
             return False
 
+    def set_brightness(self, brightness: int) -> bool:
+        """
+        Send VIA v3 set brightness command.
+
+        Args:
+            brightness: Brightness value (0-255). 0 turns the lights off.
+
+        Returns:
+            True on success, False on failure
+        """
+        if self._device is None:
+            return False
+
+        report = bytearray(REPORT_SIZE)
+        report[0] = VIA_SET_VALUE
+        report[1] = self.rgb_channel
+        report[2] = VIA_RGB_BRIGHTNESS
+        report[3] = brightness & 0xFF
+
+        try:
+            self._device.write(bytes([0x00]) + bytes(report))
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set brightness: {e}")
+            self._device = None  # Mark as disconnected
+            return False
+
     def get_color(self) -> Optional[tuple[int, int]]:
         """
         Read current (hue, saturation) from keyboard.

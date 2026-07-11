@@ -22,6 +22,8 @@ DEFAULT_CONFIG = {
     "poll_interval_ms": 100,
     "rate_limit_ms": 50,
     "enabled": True,
+    "lights_off_on_display_off": True,
+    "restore_brightness": 128,
 }
 
 
@@ -137,9 +139,22 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             except (ValueError, TypeError):
                 validated[key] = DEFAULT_CONFIG[key]
 
+    # Validate brightness (clamp to 0-255)
+    if "restore_brightness" in config:
+        try:
+            value = int(config["restore_brightness"])
+            validated["restore_brightness"] = max(0, min(255, value))
+        except (ValueError, TypeError):
+            validated["restore_brightness"] = DEFAULT_CONFIG["restore_brightness"]
+
     # Validate boolean
     if "enabled" in config:
         validated["enabled"] = bool(config.get("enabled", True))
+
+    if "lights_off_on_display_off" in config:
+        validated["lights_off_on_display_off"] = bool(
+            config.get("lights_off_on_display_off", True)
+        )
 
     # Validate colors
     if "layout_colors" in config and isinstance(config["layout_colors"], dict):

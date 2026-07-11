@@ -34,6 +34,7 @@ class HueSender:
         step: int = 8,
         delay_ms: int = 15,
         rate_limit_ms: int = 50,
+        restore_brightness: int = 255,
     ):
         self.vid = vid
         self.pid = pid
@@ -42,6 +43,7 @@ class HueSender:
         self.step = step
         self.delay_ms = delay_ms
         self.rate_limit_ms = rate_limit_ms
+        self.restore_brightness = restore_brightness
 
         # State tracking
         self.last_color: Optional[str] = None
@@ -53,7 +55,11 @@ class HueSender:
         self._keyboard_hid = None
         self._hid_available = True
         self._color_to_hsv = None
+        self._hid_lock = threading.Lock()  # serialize HID device access across threads
         self._init_hid()
+
+        # Display power / lights-off state
+        self._lights_off = False
 
         # Subprocess fallback state
         self.active_processes: List[subprocess.Popen] = []
@@ -186,10 +192,64 @@ class HueSender:
             logger.error(f"Invalid color '{color}': {e}")
             return False
 
-        success = self._keyboard_hid.set_color(hue, saturation)
+        with self._hid_lock:
+            success = self._keyboard_hid.set_color(hue, saturation)
         if success:
             logger.info(f"Color sent via HID: {color} (hue={hue}, sat={saturation})")
         return success
+
+    def _ensure_hid(self) -> bool:
+        """Ensure a live HID connection (call while holding _hid_lock)."""
+        if not self._hid_available or self._keyboard_hid is None:
+            return False
+        if self._keyboard_hid.is_connected():
+            return True
+        return self._keyboard_hid.connect()
+
+    def lights_off(self) -> bool:
+        """
+        Turn the keyboard lights off (brightness 0). Idempotent. Thread-safe.
+
+        Returns:
+            True if lights are off, False if no HID connection.
+        """
+        with self._hid_lock:
+            if self._lights_off:
+                return True
+            if not self._ensure_hid():
+                logger.warning("lights_off: no HID connection, skipping")
+                return False
+
+            if self._keyboard_hid.set_brightness(0):
+                self._lights_off = True
+                logger.info("Lights off (brightness=0)")
+                return True
+            logger.warning("lights_off: set_brightness(0) failed")
+            return False
+
+    def lights_on(self) -> bool:
+        """
+        Restore brightness to ``restore_brightness`` and force re-apply of the
+        current layout color on the next send. Idempotent. Thread-safe.
+
+        Returns:
+            True if brightness restored, False if no HID connection.
+        """
+        with self._hid_lock:
+            if not self._lights_off:
+                return True
+            if not self._ensure_hid():
+                logger.warning("lights_on: no HID connection, skipping")
+                return False
+
+            if self._keyboard_hid.set_brightness(self.restore_brightness):
+                self._lights_off = False
+                # Force the watcher to re-send the layout color next poll
+                self.last_color = None
+                logger.info(f"Lights on (brightness={self.restore_brightness})")
+                return True
+            logger.warning("lights_on: set_brightness restore failed")
+            return False
 
     def _send_via_subprocess(self, color: str, current_time: float) -> bool:
         """Send color via subprocess (fallback). Non-blocking."""
