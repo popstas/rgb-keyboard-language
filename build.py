@@ -30,13 +30,24 @@ def main():
         print("Install it with: pip install pyinstaller")
         sys.exit(1)
 
-    # Build command
+    # Build command. Invoke PyInstaller through the SAME interpreter running
+    # this script (the project venv) so that --hidden-import resolves against
+    # the environment where hidapi is installed. Using the bare `pyinstaller`
+    # on PATH may run under a different Python without hidapi, silently
+    # dropping the `hid` extension from the bundle.
     cmd = [
-        "pyinstaller",
+        sys.executable,
+        "-m",
+        "PyInstaller",
         "--onefile",
         "--windowed",  # No console window
         "--name",
         "rgb-keyboard-language",
+        # hid (hidapi) is imported lazily inside functions, so PyInstaller's
+        # static analysis misses it. Without this the frozen exe falls back to
+        # subprocess for colors and cannot control brightness (display-off).
+        "--hidden-import",
+        "hid",
         "--add-data",
         f"{src_dir}{os.pathsep}src",  # Include source files
         f"{src_dir}/rgb_keyboard_language_windows/main.py",
